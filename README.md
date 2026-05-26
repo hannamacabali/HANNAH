@@ -1,3 +1,4 @@
+<img width="1920" height="1080" alt="Screenshot 2026-05-26 123708" src="https://github.com/user-attachments/assets/b59a155d-694e-4e1f-a6fc-d761ad9f735b" />
 # Stellar Notes DApp
 
 **Stellar Notes DApp** - Blockchain-Based Decentralized Note-Taking System
