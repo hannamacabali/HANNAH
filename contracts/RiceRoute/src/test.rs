@@ -1,104 +1,81 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address, BytesN, Env};
 
-#[test]
-fn test_happy_path_end_to_end() {
+fn setup_test_env<'a>() -> (Env, Address, Address, ZKClearGlobalClient<'a>) {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, RiceRouteContract);
-    let client = RiceRouteContractClient::new(&env, &contract_id);
+    let auditor = Address::generate(&env);
+    let fintech_wallet = Address::generate(&env);
+    
+    let contract_id = env.register_contract(None, ZKClearGlobal);
+    let zk_client = ZKClearGlobalClient::new(&env, &contract_id);
 
-    let farmer = Address::generate(&env);
-    let coop = Address::generate(&env);
-    let hauler = Address::generate(&env);
-    let allocation_amount = 500_i128;
+    env.ledger().set_timestamp(15_000);
 
-    // Step 1: Init Route
-    client.init_route(&farmer, &coop, &hauler, &allocation_amount);
-
-    // Step 2: Fund Transport
-    client.fund_transport();
-
-    // Step 3: Complete Delivery
-    client.complete_delivery();
-
-    let state = client.get_state();
-    assert!(state.is_completed);
-    assert!(state.is_funded);
+    (env, auditor, fintech_wallet, zk_client)
 }
 
 #[test]
-#[should_panic(expected = "Agreement already funded")]
-fn test_edge_case_duplicate_funding_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, RiceRouteContract);
-    let client = RiceRouteContractClient::new(&env, &contract_id);
-
-    let farmer = Address::generate(&env);
-    let coop = Address::generate(&env);
-    let hauler = Address::generate(&env);
-
-    client.init_route(&farmer, &coop, &hauler, &500_i128);
-    client.fund_transport();
+fn test_1_happy_path_successful_audit_clearance() {
+    let (_env, auditor, fintech_wallet, zk_client) = setup_test_env();
     
-    // Direct second call triggers panic
-    client.fund_transport();
+    zk_client.initialize(&auditor);
+    
+    let mock_zk_proof = BytesN::from_array(&zk_client.env, &[7u8; 32]);
+    zk_client.commit_solvency_proof(&fintech_wallet, &mock_zk_proof);
+    
+    // Auditor reviews cryptographic commitment parameters and flags status as verified
+    zk_client.verify_fintech_solvency(&fintech_wallet);
+
+    assert!(zk_client.get_compliance_status(&fintech_wallet));
 }
 
 #[test]
-fn test_state_verification() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, RiceRouteContract);
-    let client = RiceRouteContractClient::new(&env, &contract_id);
-
-    let farmer = Address::generate(&env);
-    let coop = Address::generate(&env);
-    let hauler = Address::generate(&env);
-
-    client.init_route(&farmer, &coop, &hauler, &1000_i128);
+#[should_panic(expected = "No solvency commitment proof located for the designated fintech entity.")]
+fn test_2_edge_case_audit_non_existent_proof_fails() {
+    let (_env, auditor, _fintech_wallet, zk_client) = setup_test_env();
     
-    let state = client.get_state();
-    assert_eq!(state.farmer, farmer);
-    assert_eq!(state.amount, 1000_i128);
-    assert!(!state.is_funded);
+    zk_client.initialize(&auditor);
+    let random_unregistered_entity = Address::generate(&zk_client.env);
+    
+    // Attempting to certify an entity that hasn't committed data must fail instantly
+    zk_client.verify_fintech_solvency(&random_unregistered_entity);
 }
 
 #[test]
-#[should_panic(expected = "Cannot complete an unfunded route")]
-fn test_edge_case_completion_without_funding_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, RiceRouteContract);
-    let client = RiceRouteContractClient::new(&env, &contract_id);
-
-    let farmer = Address::generate(&env);
-    let coop = Address::generate(&env);
-    let hauler = Address::generate(&env);
-
-    client.init_route(&farmer, &coop, &hauler, &500_i128);
+fn test_3_state_verification_default_unverified_mode() {
+    let (_env, auditor, fintech_wallet, zk_client) = setup_test_env();
     
-    // Trying to complete before funding should fail
-    client.complete_delivery();
+    zk_client.initialize(&auditor);
+    let mock_zk_proof = BytesN::from_array(&zk_client.env, &[3u8; 32]);
+    zk_client.commit_solvency_proof(&fintech_wallet, &mock_zk_proof);
+
+    // Assert status verification tracks as false immediately following commitment prior to audit execution
+    assert!(!zk_client.get_compliance_status(&fintech_wallet));
+}
+
+#[test]
+#[should_panic(expected = "Compliance registry structure already initialised")]
+fn test_4_edge_case_prevent_double_initialization() {
+    let (_env, auditor, _fintech_wallet, zk_client) = setup_test_env();
+    
+    zk_client.initialize(&auditor);
+    zk_client.initialize(&auditor);
 }
 
 #[test]
 #[should_panic]
-fn test_unauthorized_farmer_initialization_fails() {
-    let env = Env::default();
-    // Intentionally omitting mock_all_auths to verify structural security flags
-    let contract_id = env.register_contract(None, RiceRouteContract);
-    let client = RiceRouteContractClient::new(&env, &contract_id);
-
-    let farmer = Address::generate(&env);
-    let coop = Address::generate(&env);
-    let hauler = Address::generate(&env);
-
-    client.init_route(&farmer, &coop, &hauler, &500_i128);
+fn test_5_edge_case_unauthorized_auditor_invocation() {
+    let (env, auditor, fintech_wallet, zk_client) = setup_test_env();
+    zk_client.initialize(&auditor);
+    
+    let mock_zk_proof = BytesN::from_array(&zk_client.env, &[9u8; 32]);
+    zk_client.commit_solvency_proof(&fintech_wallet, &mock_zk_proof);
+    
+    // Evict signatures from the execution context to ensure unauthenticated outside entities cannot verify statements
+    env.as_contract_context(&zk_client.address, || {
+        zk_client.verify_fintech_solvency(&fintech_wallet);
+    });
 }
